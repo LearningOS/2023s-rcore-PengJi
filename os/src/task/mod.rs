@@ -14,15 +14,17 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{VirtAddr, MapPermission, VirtPageNum};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
+use crate::timer::get_time_us;
 use alloc::vec::Vec;
+pub use context::TaskContext;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
-
-pub use context::TaskContext;
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -79,6 +81,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+        next_task.task_start_time = get_time_us();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -141,6 +144,9 @@ impl TaskManager {
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
+            if inner.tasks[next].task_start_time == 0{
+                inner.tasks[next].task_start_time = get_time_us();
+            }
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
@@ -152,6 +158,61 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    fn get_current_task_start_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let ret = inner.tasks[current].task_start_time;
+        drop(inner);
+        ret
+    }
+
+    fn increase_current_task_syscall(&self, id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_syscall_times[id] += 1;
+    }
+
+    fn get_syscall_times(&self) -> [u32; MAX_SYSCALL_NUM] {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let ret = inner.tasks[current].task_syscall_times.clone();
+        drop(inner);
+        ret
+    }
+
+    fn mmap(&self, start: usize, len: usize, port: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let svpn = VirtPageNum::from(VirtAddr::from(start));
+        let evpn = VirtAddr::from(start + len).ceil();
+        for vpn in svpn.0..evpn.0 {
+            if inner.tasks[current].memory_set.check_mapped(vpn.into()) {
+                return -1;
+            }
+        }
+        let permission = MapPermission::from_bits(((port << 1) | 0x10) as u8).unwrap();
+        inner.tasks[current]
+            .memory_set
+            .insert_framed_area(svpn.into(), evpn.into(), permission);
+        0
+    }
+
+    fn munmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let svpn = VirtPageNum::from(VirtAddr::from(start));
+        let evpn = VirtAddr::from(start + len).ceil();
+        for vpn in svpn.0..evpn.0 {
+            if inner.tasks[current].memory_set.check_unmapped(vpn.into()) {
+                return -1;
+            }
+        }
+        for vpn in svpn.0..evpn.0 {
+            inner.tasks[current].memory_set.remove_vpn(vpn.into());
+        }
+        0
     }
 }
 
@@ -201,4 +262,29 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// get_current_task_start_time
+pub fn get_current_task_start_time() -> usize {
+    TASK_MANAGER.get_current_task_start_time()
+}
+
+/// increase_current_task_syscall
+pub fn increase_current_task_syscall(id: usize) {
+    TASK_MANAGER.increase_current_task_syscall(id);
+}
+
+/// get_syscall_times
+pub fn get_syscall_times() -> [u32; MAX_SYSCALL_NUM] {
+    TASK_MANAGER.get_syscall_times()
+}
+
+/// mmap
+pub fn mmap(start: usize, len: usize, port: usize) -> isize {
+    TASK_MANAGER.mmap(start, len, port)
+}
+
+/// munmap
+pub fn munmap(start: usize, len: usize) -> isize {
+    TASK_MANAGER.munmap(start, len)
 }

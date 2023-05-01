@@ -2,6 +2,9 @@
 use super::PageTableEntry;
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
+use crate::mm::PageTable;
+use crate::task::current_user_token;
+
 /// physical address
 const PA_WIDTH_SV39: usize = 56;
 const VA_WIDTH_SV39: usize = 39;
@@ -190,6 +193,22 @@ impl PhysPageNum {
     pub fn get_mut<T>(&self) -> &'static mut T {
         let pa: PhysAddr = (*self).into();
         pa.get_mut()
+    }
+}
+
+/// virtaddr2phyaddr
+pub fn virtaddr2phyaddr(va: VirtAddr) -> Option<PhysAddr> {
+    let offset = va.page_offset();
+    let vpn = va.floor();
+    // let vpn = VirtPageNum::from(va);
+    let ppn = PageTable::from_token(current_user_token())
+        .translate(vpn)
+        .map(|e| e.ppn());
+    if let Some(ppn) = ppn {
+        let start: PhysAddr = ppn.into();
+        Some((start.0 | offset).into())
+    } else {
+        None
     }
 }
 
