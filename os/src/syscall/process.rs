@@ -2,13 +2,14 @@
 use alloc::sync::Arc;
 
 use crate::{
-    config::MAX_SYSCALL_NUM,
+    config::{MAX_SYSCALL_NUM, PAGE_SIZE},
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, virtaddr2phyaddr, VirtAddr},
     task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next, TaskStatus,
+        add_task, current_task, current_user_token, exit_current_and_run_next, get_cur_start_time,
+        get_cur_syscall, mmap, munmap, suspend_current_and_run_next, TaskStatus,
     },
+    timer::get_time_us,
 };
 
 #[repr(C)]
@@ -117,41 +118,68 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    let virt_us: VirtAddr = (ts as usize).into();
+    if let Some(pa) = virtaddr2phyaddr(virt_us) {
+        let us = get_time_us();
+        let phy_ts = pa.0 as *mut TimeVal;
+        unsafe {
+            *phy_ts = TimeVal {
+                sec: us / 1_000_000,
+                usec: us % 1_000_000,
+            };
+        }
+        0
+    } else {
+        -1
+    }
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
-pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_task_info NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
+    let virt_ti: VirtAddr = (ti as usize).into();
+    if let Some(pa) = virtaddr2phyaddr(virt_ti) {
+        let now = get_time_us();
+        let start = get_cur_start_time();
+        let st = get_cur_syscall();
+        let phy_ti = pa.0 as *mut TaskInfo;
+        unsafe {
+            *phy_ti = TaskInfo {
+                status: TaskStatus::Running,
+                syscall_times: st,
+                time: (now - start) / 1_000,
+            };
+        }
+        0
+    } else {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    if start % 0x1000 != 0 {
+        return -1;
+    }
+    if port & !0x7 != 0 || port == 0 {
+        return -1;
+    }
+    let mut ll = len;
+    if len % 0x1000 != 0 {
+        ll = (len / PAGE_SIZE + 1) * PAGE_SIZE;
+    }
+
+    mmap(start, ll, port)
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    if start % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 {
+        return -1;
+    }
+    munmap(start, len)
 }
 
 /// change data segment size
@@ -166,19 +194,23 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_spawn(path: *const u8) -> isize {
+    let cur = current_task().unwrap();
+    let new_task = cur.spawn(path);
+    if new_task.is_none() {
+        return -1;
+    }
+    let new_task = new_task.unwrap();
+    let new_pid = new_task.pid.0;
+    new_pid as isize
 }
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_set_priority(prio: isize) -> isize {
+    if prio <= 1 {
+        return -1;
+    }
+    let cur = current_task().unwrap();
+    cur.inner_exclusive_access().set_prio(prio);
+    prio
 }

@@ -301,6 +301,41 @@ impl MemorySet {
         }
     }
 }
+
+impl MemorySet {
+    /// check_mapped
+    pub fn check_mapped(&self, vpn: VirtPageNum) -> bool {
+        for area in self.areas.iter() {
+            if area.check_mapped(vpn) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// check_unmapped
+    pub fn check_unmapped(&self, vpn: VirtPageNum) -> bool {
+        for area in self.areas.iter() {
+            if area.check_mapped(vpn) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// remove_vpn
+    pub fn remove_vpn(&mut self, vpn: VirtPageNum) {
+        for i in 0..self.areas.len() {
+            if self.areas[i].check_mapped(vpn) {
+                self.areas[i].unmap(&mut self.page_table);
+                self.areas.remove(i);
+                return;
+            }
+        }
+    }
+}
+
+
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
     vpn_range: VPNRange,
@@ -399,6 +434,12 @@ impl MapArea {
             }
             current_vpn.step();
         }
+    }
+}
+
+impl MapArea {
+    pub fn check_mapped(&self, vpn: VirtPageNum) -> bool {
+        self.vpn_range.get_start().0 <= vpn.0 && self.vpn_range.get_end().0 > vpn.0
     }
 }
 

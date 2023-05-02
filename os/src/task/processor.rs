@@ -9,6 +9,9 @@ use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
+use crate::config::MAX_SYSCALL_NUM;
+use crate::mm::{MapPermission, VirtAddr, VirtPageNum};
+use crate::timer::get_time_us;
 use alloc::sync::Arc;
 use lazy_static::*;
 
@@ -59,6 +62,10 @@ pub fn run_tasks() {
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
+            if task_inner.task_start_time == 0 {
+                task_inner.task_start_time = get_time_us();
+            }
+            task_inner.stride += task_inner.pass;
             let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
             task_inner.task_status = TaskStatus::Running;
             // release coming task_inner manually
@@ -108,4 +115,72 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     unsafe {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+}
+
+/// get_cur_start_time
+pub fn get_cur_start_time() -> usize {
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .get_start_time()
+}
+
+/// get_cur_start_time
+pub fn increase_cur_syscall(id: usize) {
+    // PROCESSOR
+    //     .exclusive_access()
+    //     .increase_current_task_syscall(id);
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .increase_syscall_times(id);
+}
+
+/// get_cur_syscall
+pub fn get_cur_syscall() -> [u32; MAX_SYSCALL_NUM] {
+    // PROCESSOR.exclusive_access().get_current_task_syscall()
+    let mut ret = [0; MAX_SYSCALL_NUM];
+    ret.copy_from_slice(
+        current_task()
+            .unwrap()
+            .inner_exclusive_access()
+            .get_syscall_times()
+            .as_slice(),
+    );
+    ret
+}
+
+/// mmap
+pub fn mmap(start: usize, len: usize, port: usize) -> isize {
+    let cur = current_task().unwrap();
+    let mut inner = cur.inner_exclusive_access();
+    let svpn = VirtPageNum::from(VirtAddr::from(start));
+    let evpn = VirtAddr::from(start + len).ceil();
+    for vpn in svpn.0..evpn.0 {
+        if inner.memory_set.check_mapped(vpn.into()) {
+            return -1;
+        }
+    }
+    let permission = MapPermission::from_bits(((port << 1) | 0x10) as u8).unwrap();
+    inner
+        .memory_set
+        .insert_framed_area(svpn.into(), evpn.into(), permission);
+    0
+}
+
+/// munmap
+pub fn munmap(start: usize, len: usize) -> isize {
+    let cur = current_task().unwrap();
+    let mut inner = cur.inner_exclusive_access();
+    let svpn = VirtPageNum::from(VirtAddr::from(start));
+    let evpn = VirtAddr::from(start + len).ceil();
+    for vpn in svpn.0..evpn.0 {
+        if inner.memory_set.check_unmapped(vpn.into()) {
+            return -1;
+        }
+    }
+    for vpn in svpn.0..evpn.0 {
+        inner.memory_set.remove_vpn(vpn.into());
+    }
+    0
 }
