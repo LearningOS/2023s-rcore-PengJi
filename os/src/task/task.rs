@@ -1,8 +1,8 @@
 //! Types related to task management & Functions for completely changing TCB
-use super::TaskContext;
+use super::{add_task, TaskContext};
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
 use crate::fs::{File, Stdin, Stdout};
+use crate::config::{BIG_STRIDE, MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
@@ -35,6 +35,11 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+
+    /// get_stride
+    pub fn get_stride(&self) -> usize {
+        self.inner.exclusive_access().stride
     }
 }
 
@@ -71,6 +76,17 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    // first schedule time
+    pub task_start_time: usize,
+    // syscall count array
+    pub task_syscall_times: Vec<u32>,
+    // priority
+    pub prio: isize,
+    // stride value
+    pub stride: usize,
+    // pass value
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -93,6 +109,23 @@ impl TaskControlBlockInner {
             self.fd_table.push(None);
             self.fd_table.len() - 1
         }
+    }
+
+    pub fn increase_syscall_times(&mut self, id: usize) {
+        self.task_syscall_times[id] += 1;
+    }
+
+    pub fn get_start_time(&self) -> usize {
+        self.task_start_time
+    }
+
+    pub fn get_syscall_times(&self) -> Vec<u32> {
+        self.task_syscall_times.clone()
+    }
+
+    pub fn set_prio(&mut self, prio: isize) {
+        self.prio = prio;
+        self.pass = BIG_STRIDE / prio as usize;
     }
 }
 
@@ -135,6 +168,11 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    task_start_time: 0,
+                    task_syscall_times: [0; MAX_SYSCALL_NUM].to_vec(),
+                    prio: 16,
+                    stride: 0,
+                    pass: BIG_STRIDE / 16,
                 })
             },
         };
@@ -216,6 +254,11 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    task_start_time: 0,
+                    task_syscall_times: [0; MAX_SYSCALL_NUM].to_vec(),
+                    prio: 16,
+                    stride: 0,
+                    pass: BIG_STRIDE / 16,
                 })
             },
         });
@@ -229,6 +272,29 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// spawn
+    pub fn spawn(self: &Arc<TaskControlBlock>, elf_data: &[u8]) -> Option<Arc<TaskControlBlock>> {
+        let new_task = TaskControlBlock::new(elf_data);
+        let mut parent_inner = self.inner_exclusive_access();
+        let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
+        // clone all fds from parent to child
+        for fd in parent_inner.fd_table.iter() {
+            if let Some(file) = fd {
+                new_fd_table.push(Some(file.clone()));
+            } else {
+                new_fd_table.push(None);
+            }
+        }
+        let mut new_task_inner = new_task.inner_exclusive_access();
+        new_task_inner.fd_table = new_fd_table;
+        new_task_inner.parent = Some(Arc::downgrade(self));
+        drop(new_task_inner);
+        let tcb = Arc::new(new_task);
+        parent_inner.children.push(tcb.clone());
+        add_task(tcb.clone());
+        Some(tcb)
     }
 
     /// get pid of process
